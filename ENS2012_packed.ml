@@ -8,8 +8,7 @@ let () = assert (Printexc.record_backtrace true; true)
 
 let p = int_of_string Sys.argv.(1) (* Taille de l'échiquier *) 
 let n = p * (p - 1) * 2 (* possibilités de placer un domino *)
-let execute_classique = (p <= 10) (* Au dessus, c'est long... *)
-
+let t0 = Sys.time ()
 
 (* Les tailles des différentes tables de hachage.
  * Ces valeurs donnent des facteurs de charge raisonnables pour la méthode par
@@ -100,11 +99,11 @@ let int_of_ac2 (A x) = x
 
 (* Taille du tableau contenant les arbres. 
  * Plus de 2^id_size ne sert évidemment à rien, 
- * et le 2^(2*p + 3) (valeur expérimentale...) permet d'éviter de consommer 
+ * et le 2^(p + 10) (valeur expérimentale...) permet d'éviter de consommer 
  * trop de mémoire inutile pour les petites instances. 
  * Au maximum, on utilise (pour ce tableau) 2^29 octets ~ 500 Mo. 
  *)
-let arbres_max = min (1 lsl id_size) (1 lsl (2 * p + 3))
+let arbres_max = min (1 lsl id_size) (1 lsl (p + 10))
 let arbres = Array.make arbres_max bottom
 let () = arbres.(1) <- top
 
@@ -456,45 +455,42 @@ let chrono f x =
   let y = f x in
   (y, Sys.time() -. t0)
 
-let affiche fonction_pavage nom_fonction =
-  let sep = String.make 80 '=' in
-  printf "%s\n%s\n%s\n" sep nom_fonction sep;
-  let id_arbre, t_constr = chrono fonction_pavage () in
-  let card, t_card = chrono cardinal (get_arbre id_arbre) in
-  let card_long, t_card_long = chrono cardinal_long (get_arbre id_arbre) in
-  printf "Nombre de pavages possibles : %i\n" card;
-  printf "Et en précision arbitraire : %s\n" (Z.to_string card_long);
-  printf "Temps de construction : %.2fs\n" t_constr;
-  printf "Temps de calcul du cardinal : %.2fs\n" t_card;
-  printf "Temps de calcul du cardinal en précision arbitraire : %.2fs\n" t_card_long;
-  printf "Nombre d'arbres distincts construits : %i\n" (get_next_id ())
-  (*stats_table tableArbre "Arbre";
-  stats_table tableInter "Inter";
-  stats_table tableCardinal "Card"*)
-
+let affiche_stats {t; charge; capacite} nom =
+  let taille = 1 lsl capacite in
+  printf "Stats de la table %s :\n" nom;
+  printf " - occupation mémoire : %i Mo\n" (taille lsr 17);
+  printf " - nombre de slots : %i\n" (1 lsl (capacite - 1));
+  printf " - nombre de couples stockés : %i\n" charge;
+  printf " - facteur de charge : %.2f\n" (float (2 * charge) /. float taille)
 
 let main () =
-  try 
-    affiche pavage2 "\"Diviser pour régner\"";
-    printf "Nombre d'arbres construits : %i\n" (get_next_id ());
-    printf "Taille du tableau arbres : %i\n" (arbres_max);
-    printf "Table arbres : taille %i, utilisée %i\n"
-           (1 lsl (table_arbres.capacite - 1))
-           table_arbres.charge;
-    printf "Table inter : taille %i, utilisée %i\n"
-           (1 lsl (table_inter.capacite - 1))
-           table_inter.charge;
-  with
-  | e -> 
-         printf "Nombre d'arbres construits : %i\n" (get_next_id ());
-         printf "Taille du tableau arbres : %i\n" (arbres_max);
-         printf "Table arbres : taille %i, utilisée %i\n"
-                (1 lsl (table_arbres.capacite - 1))
-                table_arbres.charge;
-         printf "Table inter : taille %i, utilisée %i\n"
-                (1 lsl (table_inter.capacite - 1))
-                table_inter.charge;
-         raise e
-
+    let sep = String.make 80 '=' in
+    let t_alloc = Sys.time () -. t0 in
+    let id_arbre, t_constr = chrono pavage2 () in
+    let card, t_card = chrono cardinal (get_arbre id_arbre) in
+    let card_long, t_card_long = chrono cardinal_long (get_arbre id_arbre) in
+    print_endline sep;
+    printf "Nombre de pavages possibles : %i\n" card;
+    printf "Et en précision arbitraire : %s\n" (Z.to_string card_long);
+    print_newline ();
+    printf "Temps d'allocation initiale : %.2fs\n" t_alloc;
+    printf "Temps de construction : %.2fs\n" t_constr;
+    printf "Temps de calcul du cardinal : %.2fs\n" t_card;
+    printf "Temps de calcul du cardinal en précision arbitraire : %.2fs\n"
+           t_card_long;
+    printf "Temps total d'exécution : %.2fs\n" (Sys.time () -. t0);
+    print_endline sep;
+    printf "Tableau arbres :\n";
+    printf " - occupation mémoire : %i Mo\n" (arbres_max lsr 17);
+    printf " - nombre de slots : %i\n" arbres_max;
+    printf " - nombre d'arbres stockés (i.e. nombre d'arbres distincts construits) : %i\n"
+           (get_next_id ());
+    printf " - pourcentage d'utilisation : %.2f\n\n"
+           (float (get_next_id ()) /. float arbres_max);
+    affiche_stats table_arbres "arbres";
+    print_newline ();
+    affiche_stats table_inter "intersection";
+    print_newline ();
+    affiche_stats table_card "cardinal"
   
 let () = main ()
