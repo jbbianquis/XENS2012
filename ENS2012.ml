@@ -1,23 +1,23 @@
 open Printf
 
 (* let () = Printexc.record_backtrace true *)
-    
+
 (* ******************* *)
 (* Constantes globales *)
 (* ******************* *)
-    
+
 let p = int_of_string Sys.argv.(1) (* Taille de l'échiquier *)
 let execute_classique = (p <= 10) (* Au dessus, c'est long... *)
 let cste = 19 (* pour la fonction de hachage *)
 let h = 999_999_937 (* Un grand nombre premier *)
 
-(* Les tailles des différentes tables de hachage. 
+(* Les tailles des différentes tables de hachage.
  * Ces valeurs donnent des facteurs de charge raisonnables pour la méthode par
- * fusions successives. Quand on travaille colonne par colonne (et qu'on crée 
- * plus d'arbres, il vaudrait mieux les prendre un peu plus grandes. 
+ * fusions successives. Quand on travaille colonne par colonne (et qu'on crée
+ * plus d'arbres, il vaudrait mieux les prendre un peu plus grandes.
 *)
 let taille_arbre, taille_inter, taille_card = 1 lsl (p + 7), 1 lsl (p + 8), 1 lsl (p + 4)
-                                                                                  
+
 let n = p * (p - 1) * 2 (* possibilités de placer un domino *)
 
 (* ******************* *)
@@ -86,7 +86,7 @@ let hache = function
 
 exception Absent
 
-let tableArbre = Array.make taille_arbre []    
+let tableArbre = Array.make taille_arbre []
 let hache_arbre a = hache a land (taille_arbre - 1)
 
 let ajouteArbre a =
@@ -229,7 +229,7 @@ let colonne j = (* la construction de l'arbre complet *)
 
 (* _______________ *)
 (* Fonction Pavage *)
-    
+
 let pavage () =
   case := 0;
   let arbre = ref (colonne 0) in
@@ -252,12 +252,12 @@ let pavage2 () =
     | x :: y :: xs -> inter x y :: une_passe xs
     | u -> u in
   let rec fusionne = function
-    | [] -> failwith "fusionne" 
+    | [] -> failwith "fusionne"
     | [x] -> x
     | u -> fusionne @@ une_passe u in
   case := 0;
   fusionne @@ aux 0
-  
+
 
 (* ________________________ *)
 (* Résultat et statistiques *)
@@ -298,11 +298,11 @@ let affiche fonction_pavage nom_fonction =
   stats_table tableArbre "Arbre";
   stats_table tableInter "Inter";
   stats_table tableCardinal "Card"
-  
-  
+
+
 let () =
   Gc.set {(Gc.get ()) with Gc.space_overhead = 400};
-  if execute_classique then begin 
+  if execute_classique then begin
     affiche pavage "Colonne par colonne";
     id_unique := 2;
     let reinit t =

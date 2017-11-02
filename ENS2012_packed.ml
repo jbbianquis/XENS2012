@@ -1,74 +1,143 @@
 open Printf
 
-let () = Printexc.record_backtrace true 
+let () = assert (Printexc.record_backtrace true; true)
 
 (* ******************* *)
 (* Constantes globales *)
 (* ******************* *)
 
 let p = int_of_string Sys.argv.(1) (* Taille de l'échiquier *) 
+let n = p * (p - 1) * 2 (* possibilités de placer un domino *)
 let execute_classique = (p <= 10) (* Au dessus, c'est long... *)
-let cste = 19 (* pour la fonction de hachage *)
-let h = 10_000_000_019 (* Un grand nombre premier *)
+
 
 (* Les tailles des différentes tables de hachage.
  * Ces valeurs donnent des facteurs de charge raisonnables pour la méthode par
  * fusions successives. Quand on travaille colonne par colonne (et qu'on crée
- * plus d'arbres, il vaudrait mieux les prendre un peu plus grandes.
+ * plus d'arbres), il vaudrait mieux les prendre un peu plus grandes.
+ * Noter qu'avec ces valeurs, il n'y a jamais de redimensionnement des tables !
+ * En prenant des valeurs plus petites, ce sera donc un peu plus lent.
 *)
 let taille_arbre, taille_inter, taille_card =
   p + 9, p + 10, p + 6
+(* On redimensionne quand facteur de charge >= 2 / limite_charge.
+ * Valeur optimale : 3, 4 est aussi raisonnable. 
+ *)
+let limite_charge = 3
+let () = assert (limite_charge > 2)                    
 
-let n = p * (p - 1) * 2 (* possibilités de placer un domino *)
+let h = 10_000_000_019 (* Un grand nombre premier *)
 
-(* ******************* *)
-(* Références globales *)
-(* ******************* *)
 
-let case = ref 0 (* case de l'échiquier *)
-
-type ac2 = A of int [@@ unboxed]
-
+(******************************************************************************)
+(*    Définitions des types et des opérations élémentaires sur les arbres     *)
+(******************************************************************************)
+               
+(* Laisse 63 - 2*26 = 11 bits pour le numéro du domino.
+ * OK si n <= 2047, i.e. p <= 32.
+ * On ne peut construire que 2^id_size ~ 67 millions d'arbres
+ * distincts, donc de toute façon p > 32 est irréaliste.
+ *)                  
+let id_size = 26
+               
+(* Un arbre combinatoire est codé sur 63 bits de la manière suivante :
+ * - 11 bits de poids fort : étiquette de la racine (type domino)
+ * - 26 bits suivants : id_unique du fils gauche
+ * - 26 derniers bits : id_unique du fils droit
+ * - le dernier bit de l'entier est le tag de Caml (donc il vaut 1).
+ *
+ * L'id_unique d'un arbre est simplement son indice dans le tableau
+ * qui contient tous les arbres alloués. Essentiellement, on utilise
+ * un allocateur manuel linéaire puisqu'on sait qu'on ne voudra jamais 
+ * désallouer un arbre avant la fin du programme.
+ * 
+ * Les entiers 0 et 1 codent respectivement bottom et top (dont les 
+ * identifiants uniques valent aussi 0 et 1).
+ * Le code suppose que min_int n'est pas la représentation d'un arbre,
+ * mais de toute façon c'est impossible (l'id_unique 2^26 - 1 étant 
+ * le plus grand possible, il ne peut pas apparaître comme un fils
+ * d'un autre arbre.
+ *
+ * Les types sont différenciés pour avoir une chance d'écrire du 
+ * code correct, l'indication [@@ unboxed] permet d'éliminer
+ * toutes ces boîtes à la compilation. Autrement dit, le code compilé
+ * est exactement le même que si l'on avait mis "type ac = int" et 
+ * ainsi de suite.
+ *
+ * L'égalité entre deux arbres est tout simplement l'égalité sur les entiers.
+ *)
+type ac = A of int [@@ unboxed]
 type unique = U of int [@@ unboxed]
-
 type domino = D of int [@@ unboxed]                       
 
-let id_size = 26
-                       
-let root (A x) =
-  if x = 0 || x = 1 then D (max_int)
-  else D (x lsr (2 * id_size))
-
-let left (A x) = U ((x lsr id_size) land (1 lsl id_size - 1))
-
-let right (A x) = U (x land (1 lsl id_size - 1))
-
+let bottom = A 0
+let id_bottom = U 0                     
 let top = A 1
 let id_top = U 1
-            
-let bottom = A 0
-let id_bottom = U 0
 
-let comb (D i) (U a) (U b) = A (i lsl (2 * id_size) + a lsl id_size + b)
+                  
+(* Étiquette de la racine. 
+ *  On renvoie max_int si l'arbre vaut bottom ou top pour assurer 
+ * l'invariant root a < min (root (left a)) (root (right a)).
+ *)                         
+let root (A x) : domino =
+  if (A x) = bottom || (A x) = top then D (max_int)
+  else D (x lsr (2 * id_size))
 
+(* Identifiants uniques des fils gauche et droit. *)
+let left (A x) : unique =
+  assert (A x <> top && A x <> bottom);
+  U ((x lsr id_size) land (1 lsl id_size - 1))
+let right (A x) : unique =
+  assert (A x <> top && A x <> bottom);
+  U (x land (1 lsl id_size - 1))
+
+(* Construit un arbre à partir de sa racine et des id de ses fils. *)            
+let comb (D i) (U a) (U b) : ac = A (i lsl (2 * id_size) + a lsl id_size + b)
+
+(* Déballe un arbre. On en a besoin deux ou trois fois. *)                                    
 let int_of_ac2 (A x) = x                                                     
 
-let arbres_max = min (1 lsl id_size) (1 lsl (2 * p))
-                                                     
-let egal : ac2 -> ac2 -> bool = (=)
-
+(* Taille du tableau contenant les arbres. 
+ * Plus de 2^id_size ne sert évidemment à rien, 
+ * et le 2^(2*p + 3) (valeur expérimentale...) permet d'éviter de consommer 
+ * trop de mémoire inutile pour les petites instances. 
+ * Au maximum, on utilise (pour ce tableau) 2^29 octets ~ 500 Mo. 
+ *)
+let arbres_max = min (1 lsl id_size) (1 lsl (2 * p + 3))
 let arbres = Array.make arbres_max bottom
 let () = arbres.(1) <- top
-                        
-let get_arbre (U i) = arbres.(i)
 
-let set_arbre i a = arbres.(i) <- a
+(* Renvoie l'arbre correspondant à un id. La fonction pour rajouter un arbre
+ * n'est pas exposée.
+ *)
+let get_arbre (U i) : ac = arbres.(i)
 
-let sans x = get_arbre (left x)
-let avec x = get_arbre (right x)                       
+(* sous-arbre gauche, sous-arbre droit *)                                 
+let sans (x : ac) : ac = get_arbre (left x)
+let avec (x : ac) : ac = get_arbre (right x)                       
 
-let limite_charge = 3
+(******************************************************************************)
+(*               Fonctions de base sur les tables de hachage                  *)
+(******************************************************************************)
 
+(* On utilise des tables de hachage avec quadratic probing. La séquence 
+ * de recherche est conplète à condition que la taille soit une puissance 
+ * de 2 (ce qui sera toujours le cas).
+ * Ces tables supposent que clés et valeurs tiennent chacune sur un entier ;
+ * tout est stocké dans la table, il n'y a pas de pointeur.
+ * Comme on ne stocke pas le hash dans la table, il faut tout re-hacher si 
+ * l'on redimensionne : ce n'est pas un problème ici, la fonction de hachage
+ * a un coùt négligeable (et de toute façon on peut éviter de re-dimensionner).
+ *
+ * Pour simplifier, on fixe le type des clés et des valeurs à int (on définira 
+ * à chaque fois une fonction bas niveau faisant l'interface). S'il on prend
+ * un type polymorphe, il faut mettre la fonction de hachage dans le 
+ * record, ainsi que la fonction d'égalité à utiliser (sinon on passe sur la 
+ * comparaison polymorphe, ce qui sera sans doute catastrophique).
+ * 
+ *)
+                      
 (* Array.size t = 2^capacite
  * t.(2i) : clé, t.(2i + 1) : valeur associée
  * clé min_int interdite
@@ -80,17 +149,25 @@ type hash_table = {mutable capacite : int;
                    mutable t : int array}
 let vide = min_int
 
+(* Peu importe, en fait. *)
 let hache x = abs (x + (x * x) mod h) 
-             
-let trouve {t; capacite} x =
-  assert (x <> vide);
-  let hash = hache x in
+
+
+(* Le compilateur n'est pas capable de se rendre compte que 
+ * taille est une puissance de 2 et fait des idiv à chaque fois.
+ * Donc les shift sont codés à la main.
+ *)
+let trouve ({t; capacite} : hash_table) (cle : int) : int option =
+  assert (cle <> vide);
+  let hash = hache cle in
   let taille = 1 lsl capacite in
-  let i0 = 2 * (hash mod (taille / 2)) in
+  (* x land mask = x mod taille *)
+  let mask = taille - 1 in 
+  let i0 = 2 * (hash land (mask lsr 1)) in
   let i = ref i0 in
   let delta = ref 1 in
-  while t.(!i) <> x && t.(!i) <> vide do
-    i := (!i + !delta * (!delta + 1)) mod taille;
+  while t.(!i) <> cle && t.(!i) <> vide do
+    i := (!i + !delta * (!delta + 1)) land mask;
   done;
   if t.(!i) = vide then None
   else Some t.(!i + 1)
@@ -105,126 +182,94 @@ let rec redimensionne ({t; charge; capacite} as table) =
 and ajoute ({capacite; charge; t} as table) cle valeur =
   assert (cle <> vide);
   let taille = 1 lsl capacite in
-  if charge * limite_charge > taille then (assert false); (*redimensionne table;*)
+  if charge * limite_charge >= taille then redimensionne table;
+  let mask = taille - 1 in
   let hash = hache cle in
-  let i0 = 2 * (hash mod (taille / 2)) in
+  let i0 = 2 * (hash land (mask lsr 1)) in
   let i = ref (i0) in
   let delta = ref 1 in
-  assert (0 <= !i && taille = Array.length t);
+  assert (0 <= !i && !i < taille && taille = Array.length t);
   while t.(!i) <> vide do
-    i := (!i + !delta * (!delta + 1)) mod taille;
-    if !i = i0 then printf "i0 : %i, delta : %i, taille : %i, charge : %i"
-                           i0 !delta taille table.charge;
+    i := (!i + !delta * (!delta + 1)) land mask;
     assert (!i <> i0)
   done;
   t.(!i) <- cle;
   t.(!i + 1) <- valeur;
   table.charge <- table.charge + 1
 
+(******************************************************************************)
+(*     Construction des arbres, table de hachage arbre -> id                  *)
+(******************************************************************************)
+
+(* Tout est privé sauf la fonction cons (bien sûr) et une fonction permettant 
+ * de savoir combien d'arbres on a construit (qui ne sert que pour les stats
+ * à la fin).
+ *)
+
 let table_arbres =
   {capacite = taille_arbre;
    charge = 0;
-   t = Array.make (1 lsl taille_arbre) vide}
+   t = Array.make (1 lsl taille_arbre) vide} 
 
-let () =
+let () = 
   ajoute table_arbres (int_of_ac2 bottom) 0;
   ajoute table_arbres (int_of_ac2 top) 1
 
-let trouve_arbre (A x) = trouve table_arbres x
-let ajoute_arbre (A x) (U i) = ajoute table_arbres x i                                
-                                   
-let legal i a1 a2 =
-  a2 <> bottom &&  i < min (root a1) (root a2)
+let trouve_arbre ((A x) : ac) : int option = trouve table_arbres x 
+let ajoute_arbre (A x) (U i) = ajoute table_arbres x i
                                    
 let make_cons () =
+  (* !id = nombre d'arbres déjà créés = id du prochain arbre créé *)
   let id = ref 2 in
+  (* Vérifie que l'arbre demandé est "légal" (fils droit non réduit à 
+   * bottom, étiquettes strictement croissantes à partir de la racine. *)
+  let legal (i : domino) (a1 : ac) (a2 : ac) =
+    a2 <> bottom &&  i < min (root a1) (root a2) in
+  (* crée un nouvel arbre et renvoie son id *)
+  let cree_arbre (a : ac) : unique =
+    arbres.(!id) <- a;
+    incr id;
+    U (!id - 1) in
   let cons (D i) id1 id2 =
     (* assert (table_arbres.charge = !id); *)
     let arbre = comb (D i) id1 id2 in
-    if not (legal (D i) (get_arbre id1) (get_arbre id2)) then
+    (* if not (legal (D i) (get_arbre id1) (get_arbre id2)) then
       (printf "D %i, arbre %i, arbre %i\n" i
               (int_of_ac2 @@ get_arbre id1)
               (int_of_ac2 @@ get_arbre id2);
-       assert false);
-                  
+       assert false); *)
+    assert (legal (D i) (get_arbre id1) (get_arbre id2));
     match trouve_arbre arbre with
     | Some x -> U x
-    | None ->  set_arbre !id arbre;
-               ajoute_arbre arbre (U !id);
-               incr id;
-               U (!id - 1) in
+    | None ->  let id_cree = cree_arbre arbre in
+               ajoute_arbre arbre id_cree;
+               id_cree  in
   let get_next_id () = !id in
   cons, get_next_id
 
 let cons, get_next_id = make_cons ()
 
-(* Pour parcourir l'échiquier en diagonale *)
-let case_suivante () =
-  if !case mod p = 0 && !case/p < p-1 then case := !case/p + 1
-  else if !case/p = p-1 then case := p * (!case mod p + 2) - 1
-  else case := !case + (p-1)
+(******************************************************************************)
+(*    Calcul de l'intersection, table de hachage id x id -> id                *)
+(******************************************************************************)
 
-
-(* Construction de la matrice de booléens *)
-let m =
-  let t = Array.make_matrix n (p * p) false
-  and ligne = ref 0 in
-  for k = 0 to p*p-1 do
-    if !case mod p <> p-1 then
-      begin
-      t.(!ligne).( !case ) <- true;
-      t.(!ligne).( !case + 1 ) <- true;
-      incr ligne;
-      end;
-    if !case/p <> p-1 then
-      begin
-      t.(!ligne).( !case ) <- true;
-      t.(!ligne).( !case + p ) <- true;
-      incr ligne;
-      end;
-    case_suivante()
-  done;
-  t
-
-(* _________________ *)
-(* Fonction Cardinal *)
-let table_card =
-  {t = Array.make (1 lsl taille_card) vide;
-   capacite = taille_card;
-   charge = 0}
-
-let ajoute_card (A x) n = ajoute table_card x n
-let trouve_card (A x) = trouve table_card x
-
-let () =
-  ajoute_card bottom 0;
-  ajoute_card top 1
-                               
-    
-let rec cardinal a =
-    match trouve_card a with
-    | Some n -> n
-    | None ->
-       let n = cardinal (sans a) + cardinal (avec a) in
-       ajoute_card a n;
-       n
-
-(* ______________ *)
-(* Fonction Inter *)
+(* Les clés sont des couples (id, id), codés simplement sur un entier
+ * (un id sur les 26 bits de poids faibles, l'autre sur les 26 bits suivants).
+ *)
 let table_inter =
   {t = Array.make (1 lsl taille_inter) vide;
    capacite = taille_inter;
    charge = 0}
 
-let ajoute_inter (U id1) (U id2) (U id_inter) =
+let ajoute_inter (U id1) (U id2) (U id_inter) : unit =
   let cle = id1 + (id2 lsl id_size) in
   ajoute table_inter cle id_inter
 
-let trouve_inter (U id1) (U id2) =
+let trouve_inter (U id1) (U id2) : int option =
   let cle = id1 + (id2 lsl id_size) in
   trouve table_inter cle
     
-let rec inter ida idb =
+let rec inter (ida : unique) (idb : unique) : unique =
   if ida = idb then ida
   else if ida > idb then inter idb ida
   else if ida = id_bottom then id_bottom
@@ -246,12 +291,98 @@ let rec inter ida idb =
        ajoute_inter ida idb idc;
        idc
 
+(******************************************************************************)
+(*    Calcul du cardinal, table de hachage ac -> int                          *)
+(******************************************************************************)
+
+(* Les cardinaux ne rentrent rapidement plus dans un entier 63 bits. Les 
+ * tables de hachage définies sont limitées à des valeurs entières (ou pouvant
+ * être codées par un int, mais donc pas des pointeurs).
+ * Vu que la table des cardinaux est assez petite, ce n'est pas un problème 
+ * d'utiliser quelque chose d'un peu plus général si l'on veut faire les 
+ * calculs en précision arbitraire. 
+ *)
+         
+let table_card =
+  {t = Array.make (1 lsl taille_card) vide;
+   capacite = taille_card;
+   charge = 0}
+
+let ajoute_card (A x) n = ajoute table_card x n
+let trouve_card (A x) = trouve table_card x
+
+let () =
+  ajoute_card bottom 0;
+  ajoute_card top 1
+                               
+    
+let rec cardinal a =
+    match trouve_card a with
+    | Some n -> n
+    | None ->
+       let n = cardinal (sans a) + cardinal (avec a) in
+       ajoute_card a n;
+       n
+
+(* Version précision quelconque, nécessite zarith (ou de coder quelque chose
+ * à la main, ce n'est pas très compliqué vu qu'on n'a besoin que de 
+ * l'addition...).
+ *)
+
+let cardinal_long (a : ac)  =
+  let module H = Hashtbl in
+  let t = H.create 10_000 in
+  H.add t bottom Z.zero;
+  H.add t top Z.one;
+  let rec card a =
+    try H.find t a
+    with
+    | Not_found ->
+       let n = Z.add (card (sans a)) (card (avec a)) in
+       H.add t a n;
+       n in
+  card a
+  
 
 (* ________________ *)
 (* Fonction Colonne *)
 (* On commence par construire l'arbre des singletons correspondants 
 aux dominos recouvrant la case, puis on ajoute les autres valeurs 
 une par une en partant de la dernière *)
+
+(* Pour parcourir l'échiquier en diagonale *)
+let enumerateur_cases () =
+  let case = ref 0 in 
+  let case_suivante () =
+    if !case mod p = 0 && !case/p < p-1 then case := !case/p + 1
+    else if !case/p = p-1 then case := p * (!case mod p + 2) - 1
+    else case := !case + (p-1) in
+  let num_case () = !case in
+  case_suivante, num_case
+
+
+(* Construction de la matrice de booléens *)
+let m =
+  let t = Array.make_matrix n (p * p) false
+  and ligne = ref 0 in
+  let case_suivante, case = enumerateur_cases () in
+  for k = 0 to p*p-1 do
+    if case () mod p <> p-1 then
+      begin
+      t.(!ligne).(case () ) <- true;
+      t.(!ligne).(case () + 1) <- true;
+      incr ligne;
+      end;
+    if case () / p <> p-1 then
+      begin
+      t.(!ligne).(case ()) <- true;
+      t.(!ligne).(case () + p ) <- true;
+      incr ligne;
+      end;
+    case_suivante ()
+  done;
+  t
+
 
 let domino j = (* la liste des dominos couvrant la case *)
     let rec aux acc = function
@@ -275,14 +406,6 @@ let rec ajout k ida =
                      (int_of_ac2 a) ((fun (D x) -> x) k);
               raise e
   else failwith "Erreur ajout"
-(*
-  match get_arbre a with (* l'ajout d'un élément *)
-    | Zero -> Zero
-    | Un -> cons k Un Un
-    | Comb(_,i,_,_) when k<i -> cons k a a
-    | Comb(_,i,a1,a2) when k>i -> cons i (ajout k a1) (ajout k a2)
-    | _ -> failwith "Erreur Ajout"
- *)
                                
 let colonne j = (* la construction de l'arbre complet *)
     let d = domino j in
@@ -297,20 +420,21 @@ let colonne j = (* la construction de l'arbre complet *)
 (* Fonction Pavage *)
 
 let pavage () =
-  case := 0;
+  let case_suivante, case = enumerateur_cases () in
   let arbre = ref (colonne 0) in
   for k = 1 to p*p-1 do
-    case_suivante();
-    arbre := inter !arbre (colonne !case)
+    case_suivante ();
+    arbre := inter !arbre (colonne (case ()))
   done;
   !arbre
 
 
 let pavage2 () =
+  let case_suivante, case = enumerateur_cases () in
   let rec aux i =
     if i = p * p then []
     else begin
-      let c = colonne !case in
+      let c = colonne (case ()) in
       case_suivante ();
       c :: aux (i + 1)
     end in
@@ -321,7 +445,6 @@ let pavage2 () =
     | [] -> failwith "fusionne"
     | [x] -> x
     | u -> fusionne @@ une_passe u in
-  case := 0;
   fusionne @@ aux 0
 
 
@@ -333,34 +456,17 @@ let chrono f x =
   let y = f x in
   (y, Sys.time() -. t0)
 
-    
-let stats_table table nom_table =
-  let longueurs = Array.map List.length table in
-  let somme, maxi =
-    Array.fold_left (fun (s, m) u -> (s + u, max m u)) (0, 0) longueurs in
-  let seaux = Array.make (maxi + 1) 0 in
-  let taille = Array.length table in
-  for k = 0 to taille - 1 do
-    let l = List.length (table.(k)) in
-    seaux.(l) <- seaux.(l)+1
-  done;
-  printf "\nPour la table %s :\n" nom_table;
-  printf " Taille : %i\n" taille;
-  printf " Nombre d'éléments : %i\n" somme;
-  printf " Facteur de charge : %.2f\n" @@ (float somme /. float taille);
-  printf " Maximum des tailles des seaux : %i\n" maxi
-  (* printf " Nombre de seaux de longueur :\n";
-     Array.iteri (printf " %2i : %i\n") seaux *)
-
-
 let affiche fonction_pavage nom_fonction =
   let sep = String.make 80 '=' in
   printf "%s\n%s\n%s\n" sep nom_fonction sep;
   let id_arbre, t_constr = chrono fonction_pavage () in
   let card, t_card = chrono cardinal (get_arbre id_arbre) in
+  let card_long, t_card_long = chrono cardinal_long (get_arbre id_arbre) in
   printf "Nombre de pavages possibles : %i\n" card;
+  printf "Et en précision arbitraire : %s\n" (Z.to_string card_long);
   printf "Temps de construction : %.2fs\n" t_constr;
   printf "Temps de calcul du cardinal : %.2fs\n" t_card;
+  printf "Temps de calcul du cardinal en précision arbitraire : %.2fs\n" t_card_long;
   printf "Nombre d'arbres distincts construits : %i\n" (get_next_id ())
   (*stats_table tableArbre "Arbre";
   stats_table tableInter "Inter";
@@ -368,26 +474,16 @@ let affiche fonction_pavage nom_fonction =
 
 
 let main () =
-  (*Gc.set {(Gc.get ()) with Gc.space_overhead = 400};*)
-  (*if execute_classique then begin
-    affiche pavage "Colonne par colonne";
-    id_unique := 2;
-    let reinit t =
-      let n = Array.length t in
-      Array.blit (Array.make n []) 0 t 0 n in
-    reinit tableArbre; reinit tableInter; reinit tableCardinal;
-    Gc.full_major ()
-    end;*)
   try 
     affiche pavage2 "\"Diviser pour régner\"";
     printf "Nombre d'arbres construits : %i\n" (get_next_id ());
-         printf "Taille du tableau arbres : %i\n" (arbres_max);
-         printf "Table arbres : taille %i, utilisée %i\n"
-                (1 lsl (table_arbres.capacite - 1))
-                table_arbres.charge;
-         printf "Table inter : taille %i, utilisée %i\n"
-                (1 lsl (table_inter.capacite - 1))
-                table_inter.charge;
+    printf "Taille du tableau arbres : %i\n" (arbres_max);
+    printf "Table arbres : taille %i, utilisée %i\n"
+           (1 lsl (table_arbres.capacite - 1))
+           table_arbres.charge;
+    printf "Table inter : taille %i, utilisée %i\n"
+           (1 lsl (table_inter.capacite - 1))
+           table_inter.charge;
   with
   | e -> 
          printf "Nombre d'arbres construits : %i\n" (get_next_id ());

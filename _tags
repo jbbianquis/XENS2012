@@ -1,0 +1,2 @@
+true: package(zarith)
+true: optimize(3)
