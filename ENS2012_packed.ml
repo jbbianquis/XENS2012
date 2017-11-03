@@ -6,7 +6,17 @@ let () = assert (Printexc.record_backtrace true; true)
 (* Constantes globales *)
 (* ******************* *)
 
-let p = int_of_string Sys.argv.(1) (* Taille de l'échiquier *) 
+(* Premier argument en ligne de commande : taille de l'échiquier *)
+let p = int_of_string Sys.argv.(1) (* Taille de l'échiquier *)
+
+(* Si on passe true comme deuxième argument, le domino en haut à gauche
+ * est forcé en position horizontale (et on multiplie le nombre de pavages 
+ * trouvés par 2. 
+ * L'effet est négligeable pour p un peu grand.
+*)
+let symetrie =
+  Array.length Sys.argv > 2 && bool_of_string Sys.argv.(2) 
+  
 let n = p * (p - 1) * 2 (* possibilités de placer un domino *)
 let t0 = Sys.time ()
 
@@ -18,7 +28,7 @@ let t0 = Sys.time ()
  * En prenant des valeurs plus petites, ce sera donc un peu plus lent.
 *)
 let taille_arbre, taille_inter, taille_card =
-  p + 9, p + 10, p + 6
+  p + 8, p + 10, p + 5
 (* On redimensionne quand facteur de charge >= 2 / limite_charge.
  * Valeur optimale : 3, 4 est aussi raisonnable. 
  *)
@@ -103,7 +113,7 @@ let int_of_ac2 (A x) = x
  * trop de mémoire inutile pour les petites instances. 
  * Au maximum, on utilise (pour ce tableau) 2^29 octets ~ 500 Mo. 
  *)
-let arbres_max = min (1 lsl id_size) (1 lsl (p + 10))
+let arbres_max = min (1 lsl id_size) (1 lsl (p + 8))
 let arbres = Array.make arbres_max bottom
 let () = arbres.(1) <- top
 
@@ -348,9 +358,9 @@ let cardinal_long (a : ac)  =
 (* On commence par construire l'arbre des singletons correspondants 
 aux dominos recouvrant la case, puis on ajoute les autres valeurs 
 une par une en partant de la dernière *)
-
-(* Pour parcourir l'échiquier en diagonale *)
-let enumerateur_cases () =
+   
+(* Pour parcourir l'échiquier en diagonale. Cf tab_of_enum *)
+let enumerateur_maxime () =
   let case = ref 0 in 
   let case_suivante () =
     if !case mod p = 0 && !case/p < p-1 then case := !case/p + 1
@@ -359,84 +369,93 @@ let enumerateur_cases () =
   let num_case () = !case in
   case_suivante, num_case
 
+(* Pour parcourir en diagonale mais sans saut (on alterne diagonales 
+ * ascendantes et descendantes. Cf tab_of_enum *)
+let enumerateur_bis () =
+  let case = ref 0 in
+  let sens = ref 1 in
+  let haut () = (!case < p) in
+  let bas () = (!case + p >= p * p) in
+  let gauche () = (!case mod p = 0) in
+  let droite () = (!case mod p = p - 1) in
+  let flip () = (sens := - !sens) in
+  let case_suivante () =
+    if gauche () && not (bas ()) && !sens = 1 then (case := !case + p; flip ())
+    else if haut () && not (droite ()) && !sens = -1 then (incr case; flip ())
+    else if bas () && not (droite ()) && !sens = 1 then (incr case; flip ())
+    else if droite () && !sens = -1 then (case := !case + p; flip ())
+    else case := !case + !sens * (p-1) in
+  let num_case () = !case in
+  case_suivante, num_case
 
-(* Construction de la matrice de booléens *)
-let m =
+(* Renvoie le tableau des numéros de case dans l'ordre défini par
+ * l'énumération.
+ * Pour p = 4, on a la numérotation :
+ *  0  1  2  3
+ *  4  5  6  7 
+ *  8  9 10 11 
+ * 12 13 14 15 
+ * et les tableaux :
+ * tab_of_enum enumerateur_maxime :
+ *   [|0; 1; 4; 2; 5; 8; 3; 6; 9; 12; 7; 10; 13; 11; 14; 15|]
+ * tab_of_enum enumerateur_bis :
+ *   [|0; 4; 1; 2; 5; 8; 12; 9; 6; 3; 7; 10; 13; 14; 11; 15|]
+ * Expérimentalement, enumerateur_bis est un peu meilleur et les 
+ * deux sont bien meilleurs que l'enumération standard 
+ * [|0; 1; 2; ... ; p*p - 1|].
+ * Si l'on énumère les cases dans un ordre aléatoire, c'est complètement
+ * catastrophique.
+ *)
+let tab_of_enum enum =
+  let avance, case = enum () in
+  Array.init (p * p) (fun i -> let x = case () in avance (); x)
+
+let matrice cases =
   let t = Array.make_matrix n (p * p) false
   and ligne = ref 0 in
-  let case_suivante, case = enumerateur_cases () in
   for k = 0 to p*p-1 do
-    if case () mod p <> p-1 then
+    if cases.(k) mod p <> p-1 then
       begin
-      t.(!ligne).(case () ) <- true;
-      t.(!ligne).(case () + 1) <- true;
+      t.(!ligne).(cases.(k)) <- true;
+      t.(!ligne).(cases.(k) + 1) <- true;
       incr ligne;
       end;
-    if case () / p <> p-1 then
+    if cases.(k) / p <> p-1 then
       begin
-      t.(!ligne).(case ()) <- true;
-      t.(!ligne).(case () + p ) <- true;
+      t.(!ligne).(cases.(k)) <- true;
+      t.(!ligne).(cases.(k) + p) <- true;
       incr ligne;
       end;
-    case_suivante ()
   done;
   t
-
-
-let domino j = (* la liste des dominos couvrant la case *)
-    let rec aux acc = function
-        | -1 -> acc
-        | k -> if m.(k).(j) then aux (D k :: acc) (k - 1) else aux acc (k - 1)
-    in aux [] (n-1)
-
-
-let rec singletons = function (* l'arbre des singletons *)
-    | [] -> id_bottom
-    | a::q -> cons a (singletons q) id_top
-
-let rec ajout k ida =
-  let a = get_arbre ida in
-  if a = bottom then id_bottom
-  else if a = top then cons k id_top id_top
-  else if k < root a then cons k ida ida
-  else if k > root a then
-    try cons (root a) (ajout k (left a)) (ajout k (right a))
-    with e -> printf "a : %i, k : %i"
-                     (int_of_ac2 a) ((fun (D x) -> x) k);
-              raise e
-  else failwith "Erreur ajout"
-                               
-let colonne j = (* la construction de l'arbre complet *)
-    let d = domino j in
-    let s = singletons d in
-    let rec aux acc = function
-        | -1 -> acc
-        | k when List.mem (D k) d -> aux acc (k-1)
-        | k ->  aux (ajout (D k) acc) (k-1)
-    in aux s (n-1)
-
+   
+let interdit m k = symetrie && k <> 0 && (m.(k).(0) || m.(k).(1))
+    
+let colonne m j =
+  let rec remplie (D k) =
+    if k = n then id_top
+    else if m.(k).(j) || interdit m k then remplie (D (k + 1))
+    else
+      let a = remplie (D (k + 1)) in
+      cons (D k) a a
+  and a_remplir (D k) =
+    if k = n then id_bottom
+    else if interdit m k then a_remplir (D (k + 1))
+    else if m.(k).(j) then
+      let avec_k = remplie (D (k + 1)) in
+      let sans_k = a_remplir (D (k + 1)) in
+      cons (D k) sans_k avec_k
+    else
+      let a = a_remplir (D (k + 1)) in
+      if a = id_bottom then id_bottom
+      else cons (D k) a a in
+  a_remplir (D 0)     
+                         
 (* _______________ *)
 (* Fonction Pavage *)
 
-let pavage () =
-  let case_suivante, case = enumerateur_cases () in
-  let arbre = ref (colonne 0) in
-  for k = 1 to p*p-1 do
-    case_suivante ();
-    arbre := inter !arbre (colonne (case ()))
-  done;
-  !arbre
 
-
-let pavage2 () =
-  let case_suivante, case = enumerateur_cases () in
-  let rec aux i =
-    if i = p * p then []
-    else begin
-      let c = colonne (case ()) in
-      case_suivante ();
-      c :: aux (i + 1)
-    end in
+let pavage ordre_cases =
   let rec une_passe = function
     | x :: y :: xs -> inter x y :: une_passe xs
     | u -> u in
@@ -444,7 +463,13 @@ let pavage2 () =
     | [] -> failwith "fusionne"
     | [x] -> x
     | u -> fusionne @@ une_passe u in
-  fusionne @@ aux 0
+  ordre_cases
+  |> Array.to_list
+  |> List.map @@ colonne (matrice ordre_cases)
+  |> fusionne
+
+let pavage2 () = pavage (tab_of_enum enumerateur_bis)
+
 
 
 (* ________________________ *)
@@ -468,7 +493,9 @@ let main () =
     let t_alloc = Sys.time () -. t0 in
     let id_arbre, t_constr = chrono pavage2 () in
     let card, t_card = chrono cardinal (get_arbre id_arbre) in
+    let card = if symetrie then 2 * card else card in
     let card_long, t_card_long = chrono cardinal_long (get_arbre id_arbre) in
+    let card_long = if symetrie then Z.mul card_long (Z.of_int 2) else card_long in
     print_endline sep;
     printf "Nombre de pavages possibles : %i\n" card;
     printf "Et en précision arbitraire : %s\n" (Z.to_string card_long);

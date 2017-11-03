@@ -1,0 +1,33 @@
+================================================================================
+Nombre de pavages possibles : 36
+Et en précision arbitraire : 36
+
+Temps d'allocation initiale : 0.00s
+Temps de construction : 0.00s
+Temps de calcul du cardinal : 0.00s
+Temps de calcul du cardinal en précision arbitraire : 0.00s
+Temps total d'exécution : 0.00s
+================================================================================
+Tableau arbres :
+ - occupation mémoire : 0 Mo
+ - nombre de slots : 4096
+ - nombre d'arbres stockés (i.e. nombre d'arbres distincts construits) : 645
+ - pourcentage d'utilisation : 0.16
+
+Stats de la table arbres :
+ - occupation mémoire : 0 Mo
+ - nombre de slots : 2048
+ - nombre de couples stockés : 645
+ - facteur de charge : 0.31
+
+Stats de la table intersection :
+ - occupation mémoire : 0 Mo
+ - nombre de slots : 8192
+ - nombre de couples stockés : 616
+ - facteur de charge : 0.08
+
+Stats de la table cardinal :
+ - occupation mémoire : 0 Mo
+ - nombre de slots : 256
+ - nombre de couples stockés : 42
+ - facteur de charge : 0.16
