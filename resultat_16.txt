@@ -2,17 +2,17 @@
 Nombre de pavages possibles : 1320134561548177664
 Et en précision arbitraire : 2444888770250892795802079170816
 
-Temps d'allocation initiale : 0.40s
-Temps de construction : 1.82s
-Temps de calcul du cardinal : 0.06s
-Temps de calcul du cardinal en précision arbitraire : 0.30s
-Temps total d'exécution : 2.58s
+Temps d'allocation initiale : 0.33s
+Temps de construction : 1.26s
+Temps de calcul du cardinal : 0.05s
+Temps de calcul du cardinal en précision arbitraire : 0.27s
+Temps total d'exécution : 1.91s
 ================================================================================
 Tableau arbres :
- - occupation mémoire : 128 Mo
- - nombre de slots : 16777216
+ - occupation mémoire : 64 Mo
+ - nombre de slots : 8388608
  - nombre d'arbres stockés (i.e. nombre d'arbres distincts construits) : 3334101
- - pourcentage d'utilisation : 0.20
+ - pourcentage d'utilisation : 0.40
 
 Stats de la table arbres :
  - occupation mémoire : 128 Mo

@@ -9,13 +9,9 @@ let () = assert (Printexc.record_backtrace true; true)
 (* Premier argument en ligne de commande : taille de l'échiquier *)
 let p = int_of_string Sys.argv.(1) (* Taille de l'échiquier *)
 
-(* Si on passe true comme deuxième argument, le domino en haut à gauche
- * est forcé en position horizontale (et on multiplie le nombre de pavages 
- * trouvés par 2. 
- * L'effet est négligeable pour p un peu grand.
-*)
-let symetrie =
-  Array.length Sys.argv > 2 && bool_of_string Sys.argv.(2) 
+(* Choix de l'ordre d'énumération des cases. 
+ * Voir plus bas pour les choix possibles. *)
+let enum = "diagonales_sans_saut"
   
 let n = p * (p - 1) * 2 (* possibilités de placer un domino *)
 let t0 = Sys.time ()
@@ -29,13 +25,15 @@ let t0 = Sys.time ()
 *)
 let taille_arbre, taille_inter, taille_card =
   p + 8, p + 10, p + 5
-(* On redimensionne quand facteur de charge >= 2 / limite_charge.
- * Valeur optimale : 3, 4 est aussi raisonnable. 
+(* On redimensionne quand facteur de charge * 128 >= limite_charge.
+ * Le coût d'une recherche est généralement dominé par le coût du
+ * cache miss sur le premier accès (~85% du coût total), il est 
+ * donc contre-productif de chercher à avoir un facteur de 
+ * charge trop petit.
  *)
-let limite_charge = 3
-let () = assert (limite_charge > 2)                    
+let limite_charge = 96
 
-let h = 10_000_000_019 (* Un grand nombre premier *)
+let h = 100_000_000_003 (* Un grand nombre premier *)
 
 
 (******************************************************************************)
@@ -72,26 +70,36 @@ let id_size = 26
  * toutes ces boîtes à la compilation. Autrement dit, le code compilé
  * est exactement le même que si l'on avait mis "type ac = int" et 
  * ainsi de suite.
+ * Pour information, c'est environ 2.5x plus lent si l'on enlève les
+ * [@@ unboxed] !
  *
  * L'égalité entre deux arbres est tout simplement l'égalité sur les entiers.
  *)
 type ac = A of int [@@ unboxed]
 type unique = U of int [@@ unboxed]
-type domino = D of int [@@ unboxed]                       
+type domino = D of int [@@ unboxed]
 
 let bottom = A 0
 let id_bottom = U 0                     
 let top = A 1
 let id_top = U 1
 
+(* Taille du tableau contenant les arbres. 
+ * Plus de 2^id_size ne sert évidemment à rien (cf plus bas), 
+ * et le 2^(p + 7) (valeur expérimentale...) permet d'éviter de consommer 
+ * trop de mémoire inutile pour les petites instances. 
+ * Au maximum, on utilise (pour ce tableau) 2^29 octets = 512 Mo. 
+ *)
+let arbres_max = min (1 lsl id_size) (1 lsl (p + if enum = "diagonales_sans_saut" then 7 else 10))
+
+               
                   
 (* Étiquette de la racine. 
- *  On renvoie max_int si l'arbre vaut bottom ou top pour assurer 
- * l'invariant root a < min (root (left a)) (root (right a)).
+ * Il est illégal d'appeler cette fonction sur bottom ou top.
  *)                         
 let root (A x) : domino =
-  if (A x) = bottom || (A x) = top then D (max_int)
-  else D (x lsr (2 * id_size))
+  assert ((A x) <> bottom && (A x) <> top);
+  D (x lsr (2 * id_size))
 
 (* Identifiants uniques des fils gauche et droit. *)
 let left (A x) : unique =
@@ -107,13 +115,6 @@ let comb (D i) (U a) (U b) : ac = A (i lsl (2 * id_size) + a lsl id_size + b)
 (* Déballe un arbre. On en a besoin deux ou trois fois. *)                                    
 let int_of_ac2 (A x) = x                                                     
 
-(* Taille du tableau contenant les arbres. 
- * Plus de 2^id_size ne sert évidemment à rien, 
- * et le 2^(p + 10) (valeur expérimentale...) permet d'éviter de consommer 
- * trop de mémoire inutile pour les petites instances. 
- * Au maximum, on utilise (pour ce tableau) 2^29 octets ~ 500 Mo. 
- *)
-let arbres_max = min (1 lsl id_size) (1 lsl (p + 8))
 let arbres = Array.make arbres_max bottom
 let () = arbres.(1) <- top
 
@@ -158,8 +159,8 @@ type hash_table = {mutable capacite : int;
                    mutable t : int array}
 let vide = min_int
 
-(* Peu importe, en fait. *)
-let hache x = abs (x + (x * x) mod h) 
+(* Marche plutôt bien, pas trop coûteux à calculer. *)
+let hache x = abs ((x + x lsl (1 + id_size)) mod h) 
 
 
 (* Le compilateur n'est pas capable de se rendre compte que 
@@ -174,12 +175,24 @@ let trouve ({t; capacite} : hash_table) (cle : int) : int option =
   let mask = taille - 1 in 
   let i0 = 2 * (hash land (mask lsr 1)) in
   let i = ref i0 in
-  let delta = ref 1 in
-  while t.(!i) <> cle && t.(!i) <> vide do
-    i := (!i + !delta * (!delta + 1)) land mask;
-  done;
+  (* Je n'ai pas encore compris pourquoi, mais traiter séparément 
+   * le premier cas a un impact mesuralble sur les perfs. 
+   * Au départ, j'avais juste mis ça pour avoir les cache miss 
+   * séparément sur le premier accès et les autres, mais résultat
+   * je le laisse. *)
   if t.(!i) = vide then None
-  else Some t.(!i + 1)
+  else if t.(!i) = cle then Some t.(!i + 1)
+  else begin
+      let delta = ref 2 in
+      while t.(!i) <> vide && t.(!i) <> cle do
+        i := (!i + !delta) land mask;
+        delta := !delta + 2;
+        assert (!i <> i0)
+      done;
+      if t.(!i) = vide then None
+      else Some t.(!i + 1)
+    end
+    
 
 let rec redimensionne ({t; charge; capacite} as table) =
   let taille = 1 lsl capacite in
@@ -191,17 +204,17 @@ let rec redimensionne ({t; charge; capacite} as table) =
 and ajoute ({capacite; charge; t} as table) cle valeur =
   assert (cle <> vide);
   let taille = 1 lsl capacite in
-  if charge * limite_charge >= taille then redimensionne table;
+  if taille * limite_charge <= charge * 256 then redimensionne table;
   let mask = taille - 1 in
   let hash = hache cle in
   let i0 = 2 * (hash land (mask lsr 1)) in
   let i = ref (i0) in
-  let delta = ref 1 in
-  assert (0 <= !i && !i < taille && taille = Array.length t);
+  let delta = ref 2 in
   while t.(!i) <> vide do
-    i := (!i + !delta * (!delta + 1)) land mask;
+    i := (!i + !delta) land mask;
+    delta := !delta + 2;
     assert (!i <> i0)
-  done;
+  done;              
   t.(!i) <- cle;
   t.(!i + 1) <- valeur;
   table.charge <- table.charge + 1
@@ -410,6 +423,21 @@ let tab_of_enum enum =
   let avance, case = enum () in
   Array.init (p * p) (fun i -> let x = case () in avance (); x)
 
+let cases_diagonales_1 () = tab_of_enum enumerateur_maxime
+let cases_diagonales_2 () = tab_of_enum enumerateur_bis
+
+                                   
+let tab_serpent () =
+  let t = Array.init (p * p) (fun i -> i) in
+  for ligne = 0 to p - 1 do
+    if ligne mod 2 = 1 then
+      for i = 0 to p - 1 do
+        t.(ligne * p + i) <- ligne * p + p - i - 1
+      done
+  done;
+  t
+                 
+
 let matrice cases =
   let t = Array.make_matrix n (p * p) false
   and ligne = ref 0 in
@@ -429,18 +457,15 @@ let matrice cases =
   done;
   t
    
-let interdit m k = symetrie && k <> 0 && (m.(k).(0) || m.(k).(1))
-    
 let colonne m j =
   let rec remplie (D k) =
     if k = n then id_top
-    else if m.(k).(j) || interdit m k then remplie (D (k + 1))
+    else if m.(k).(j) then remplie (D (k + 1))
     else
       let a = remplie (D (k + 1)) in
       cons (D k) a a
   and a_remplir (D k) =
     if k = n then id_bottom
-    else if interdit m k then a_remplir (D (k + 1))
     else if m.(k).(j) then
       let avec_k = remplie (D (k + 1)) in
       let sans_k = a_remplir (D (k + 1)) in
@@ -455,7 +480,7 @@ let colonne m j =
 (* Fonction Pavage *)
 
 
-let pavage ordre_cases =
+let pave ordre_cases =
   let rec une_passe = function
     | x :: y :: xs -> inter x y :: une_passe xs
     | u -> u in
@@ -468,8 +493,13 @@ let pavage ordre_cases =
   |> List.map @@ colonne (matrice ordre_cases)
   |> fusionne
 
-let pavage2 () = pavage (tab_of_enum enumerateur_bis)
-
+let pavage () =
+  match enum with
+  | "diagonales" -> pave (cases_diagonales_1 ())
+  | "diagonales_sans_saut" -> pave (cases_diagonales_2 ())
+  | "basique" -> pave (Array.init (p * p) (fun i -> i))
+  | "basique_sans_saut" -> pave (tab_serpent ())
+  | _ -> failwith "ordre d'enumeration inconnu"
 
 
 (* ________________________ *)
@@ -491,11 +521,9 @@ let affiche_stats {t; charge; capacite} nom =
 let main () =
     let sep = String.make 80 '=' in
     let t_alloc = Sys.time () -. t0 in
-    let id_arbre, t_constr = chrono pavage2 () in
+    let id_arbre, t_constr = chrono pavage () in
     let card, t_card = chrono cardinal (get_arbre id_arbre) in
-    let card = if symetrie then 2 * card else card in
     let card_long, t_card_long = chrono cardinal_long (get_arbre id_arbre) in
-    let card_long = if symetrie then Z.mul card_long (Z.of_int 2) else card_long in
     print_endline sep;
     printf "Nombre de pavages possibles : %i\n" card;
     printf "Et en précision arbitraire : %s\n" (Z.to_string card_long);

@@ -10,9 +10,9 @@ Temps total d'exécution : 0.00s
 ================================================================================
 Tableau arbres :
  - occupation mémoire : 0 Mo
- - nombre de slots : 1024
+ - nombre de slots : 512
  - nombre d'arbres stockés (i.e. nombre d'arbres distincts construits) : 26
- - pourcentage d'utilisation : 0.03
+ - pourcentage d'utilisation : 0.05
 
 Stats de la table arbres :
  - occupation mémoire : 0 Mo
